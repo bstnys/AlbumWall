@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Album Wall</title>
+<style>
+/* GPU notes: every animation below touches only opacity / filter / transform on its own
+   composited layer, so nothing is repainted per frame. Background color changes fade a
+   full-screen layer's opacity instead of animating the color itself. */
+:root{ --s:135px; }
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#4a7096;cursor:default;user-select:none;-webkit-user-select:none}
+
+#tint{position:fixed;inset:0;pointer-events:none;opacity:0}
+#tint.on{animation:tint 1.6s ease both;will-change:opacity}
+@keyframes tint{to{opacity:1}}
+#stage{position:fixed;inset:0;perspective:900px}
+#cover{position:absolute;left:50%;top:50%;width:var(--s);height:var(--s);
+  margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);
+  background:#222;border-radius:2px;overflow:hidden;
+  box-shadow:0 14px 30px rgba(0,0,0,.3),0 3px 8px rgba(0,0,0,.18);
+  transition:transform .5s cubic-bezier(.2,.9,.2,1)}
+#cover.press{transition-duration:.12s}
+.face{position:absolute;inset:0;background:center/cover no-repeat}
+.face.in{animation:blurIn var(--dur) cubic-bezier(.2,.8,.2,1) both;will-change:opacity,filter}
+.face.out{animation:blurOut var(--dur) cubic-bezier(.2,.8,.2,1) both;will-change:opacity,filter}
+@keyframes blurIn{from{opacity:0;filter:blur(var(--blur))}to{opacity:1;filter:blur(0)}}
+@keyframes blurOut{from{opacity:1;filter:blur(0)}to{opacity:0;filter:blur(var(--blur))}}
+:root{--dur:.9s;--blur:12px}
+</style>
+</head>
+<body>
+<div id="tint"></div>
+<div id="stage"><div id="cover"></div></div>
+
+<script>
+const cover = document.getElementById('cover'), root = document.documentElement;
+const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.wall;
+let S = 135, tilt = '', pressed = false;
+
+/* first image in ~/Pictures/AlbumWall (served by the app as covers.json) */
+async function loadCover(){
+  try{
+    const r = await fetch('covers.json', { cache: 'no-store' });
+    if (r.ok){ const list = await r.json(); if (list.length) return 'covers/' + encodeURIComponent(list[0]); }
+  }catch(e){}
+  return null;
+}
+
+/* dominant color → background */
+function extractColor(im){
+  return new Promise(res => {
+      try{
+        const c = document.createElement('canvas'); c.width = c.height = 32;
+        const g = c.getContext('2d'); g.drawImage(im, 0, 0, 32, 32);
+        const d = g.getImageData(0, 0, 32, 32).data, bins = {};
+        /* every pixel counts: colors are grouped by hue, black / white / gray by brightness */
+        for (let i = 0; i < d.length; i += 4){
+          const [h, s, l] = hsl(d[i], d[i+1], d[i+2]);
+          const neutral = l < .12 || l > .92 || s < .15;
+          const k = neutral ? (l < .2 ? 'black' : l > .85 ? 'white' : 'gray') : Math.round(h / 24) % 15;
+          const b = bins[k] || (bins[k] = { neutral, w: 0, r: 0, g: 0, b: 0, n: 0 });
+          b.w += neutral ? .35 : .35 + s;              // same area → the more vivid color wins
+          b.r += d[i]; b.g += d[i+1]; b.b += d[i+2]; b.n++;
+        }
+        const best = Object.values(bins).sort((a, b) => b.w - a.w)[0];
+        if (!best) return res(null);
+        const [H, s, l] = hsl(best.r / best.n, best.g / best.n, best.b / best.n);
+        const [Sx, L] = best.neutral
+          ? [Math.min(s, .2), Math.min(.85, Math.max(.06, l))]                         // black stays black, white stays light
+          : [Math.min(.8, s), Math.min(.9, Math.max(.08, l))];                        // keep the cover's own tone (light pink stays light pink)
+        res(`hsl(${Math.round(H)} ${Math.round(Sx * 100)}% ${Math.round(L * 100)}%)`);
+      }catch(e){ res(null); }
+  });
+}
+function hsl(r, g, b){
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn; let h = 0, s = 0; const l = (mx + mn) / 2;
+  if (d){ s = l > .5 ? d / (2 - mx - mn) : d / (mx + mn); h = (mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4) * 60; }
+  return [h, s, l];
+}
+
+let lastT = null;
+function apply(){ const t = tilt + (pressed ? ' scale(.95)' : ''); if (t !== lastT){ cover.style.transform = t; lastT = t; } }
+function sizeUp(){
+  S = Math.round(Math.max(80, Math.min(210, Math.min(innerWidth, innerHeight) * .135)));
+  root.style.setProperty('--s', S + 'px');
+}
+
+/* pointer — fed by the mac app (or the browser when opened directly) */
+window.albumWall = {
+  move(x, y, covered){
+    const dx = x - innerWidth / 2, dy = y - innerHeight / 2, R = S * 3;
+    if (covered || Math.abs(dx) > R || Math.abs(dy) > R) tilt = '';
+    else tilt = `rotateX(${(-dy / R * 22).toFixed(2)}deg) rotateY(${(dx / R * 24).toFixed(2)}deg)`;
+    apply();
+  },
+  leave(){ tilt = ''; apply(); },
+  click(x, y){
+    const r = cover.getBoundingClientRect();
+    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+    native && native.postMessage({ cmd: 'playpause' });
+    pressed = true; cover.classList.add('press'); apply();
+    setTimeout(() => { pressed = false; cover.classList.remove('press'); apply(); }, 140);
+  }
+};
+if (!native){
+  addEventListener('mousemove', e => albumWall.move(e.clientX, e.clientY, false));
+  document.addEventListener('mouseleave', () => albumWall.leave());
+  addEventListener('click', e => albumWall.click(e.clientX, e.clientY));
+}
+
+/* the track playing in Spotify / Apple Music wins; the folder cover is the fallback */
+let folderSrc = null, shown = null;
+async function show(src){
+  if (!src || src === shown) return;
+  shown = src;
+  const im = new Image();
+  im.src = src;
+  try{ await im.decode(); }catch(e){ return; }      // decode off the main thread before animating
+  if (shown !== src) return;
+
+  /* a change mid-transition: snap the previous one to its end state */
+  cover.querySelectorAll('.face.out').forEach(f => f.remove());
+  cover.querySelectorAll('.face.in').forEach(f => f.classList.remove('in'));
+
+  const old = cover.querySelector('.face');
+  const face = document.createElement('div');
+  face.className = 'face in';
+  face.style.backgroundImage = `url("${src}")`;
+  face.addEventListener('animationend', () => face.classList.remove('in'), { once: true });  // drop filter + layer
+  cover.appendChild(face);
+  if (old){ old.classList.add('out'); old.addEventListener('animationend', () => old.remove(), { once: true }); }
+
+  const color = await extractColor(im);
+  if (color && shown === src) fadeBackground(color);
+}
+
+const tintEl = document.getElementById('tint');
+function fadeBackground(color){
+  if (tintEl.classList.contains('on')) document.body.style.background = tintEl.style.background;  // finish the last fade
+  tintEl.classList.remove('on'); void tintEl.offsetWidth;
+  tintEl.style.background = color;
+  tintEl.classList.add('on');
+}
+tintEl.addEventListener('animationend', () => {
+  document.body.style.background = tintEl.style.background;
+  tintEl.classList.remove('on');                    // layer released when idle
+});
+albumWall.nowPlaying = t => show(t && t.src ? t.src : folderSrc);
+
+(async () => {
+  sizeUp();
+  addEventListener('resize', sizeUp);
+  folderSrc = await loadCover();
+  if (native) native.postMessage({ cmd: 'hello' });   // app replies with the playing track, if any
+  if (!shown) show(folderSrc);
+})();
+</script>
+</body>
+</html>
