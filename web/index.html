@@ -91,9 +91,10 @@ function sizeUp(){
 /* pointer — fed by the mac app (or the browser when opened directly) */
 window.albumWall = {
   move(x, y, covered){
-    const dx = x - innerWidth / 2, dy = y - innerHeight / 2, R = S * 3;
+    /* react only over the cover itself (+10% margin so the edge doesn't flicker) */
+    const dx = x - innerWidth / 2, dy = y - innerHeight / 2, R = S / 2 * 1.1;
     if (covered || Math.abs(dx) > R || Math.abs(dy) > R) tilt = '';
-    else tilt = `rotateX(${(-dy / R * 22).toFixed(2)}deg) rotateY(${(dx / R * 24).toFixed(2)}deg)`;
+    else tilt = `rotateX(${(-dy / R * 14).toFixed(2)}deg) rotateY(${(dx / R * 16).toFixed(2)}deg)`;
     apply();
   },
   leave(){ tilt = ''; apply(); },
